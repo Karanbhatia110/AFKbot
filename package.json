@@ -14,3 +14,8 @@
     "mineflayer": "^4.33.0"
   }
 }
+{
+  "scripts": {
+    "start": "node index.js"
+  }
+}
