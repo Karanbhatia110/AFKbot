@@ -48,6 +48,7 @@ let currentTarget = null;
 let initialTravelDistance = 0;
 let lastAttackTime = 0;
 let tryingToMountBoat = false;
+let manualOverride = false; // If true, auto-logic won't switch modes
 
 // Intervals (managed in startBot/end events)
 let modeCheckInterval = null;
@@ -86,17 +87,20 @@ discordClient.on("messageCreate", async (message) => {
     switch (cmd) {
         case "!wander":
             if (!isBotReady) { message.reply("Bot is offline."); return; }
+            manualOverride = true; // User explicitly asked to wander
             setModeWander();
-            message.reply("Switched to **Wander** mode.");
+            message.reply("Switched to **Wander** mode (Manual Override ON).");
             break;
         case "!stay":
             if (!isBotReady) { message.reply("Bot is offline."); return; }
+            manualOverride = true; // User explicitly asked to stay
             setModeStay();
             message.reply("Stopped movement. Mode: **Stay**.");
             break;
         case "!follow":
             if (!isBotReady) { message.reply("Bot is offline."); return; }
             if (isOwnerOnline()) {
+                manualOverride = false; // Returning to auto-partner mode
                 setModePartner();
                 message.reply("Switched to **Partner** mode (Following owner).");
             } else {
@@ -226,60 +230,53 @@ async function startTravelToTarget(targetVec3) {
 
     console.log(`[MODE] Goto request → calculating best path...`);
 
+    // Reset state
     currentTarget = targetVec3;
     isTravelingToOwner = false;
-    currentMode = "goto"; // reusing "goto" string to keep status updater simple, or could use "travelTarget" if adapting status updater
-    // The user code used "travelTarget" but status updater expects "goto" or "travel" etc.
-    // I will stick to "goto" for now to match status logic or update status logic.
-    // User logic had: currentMode = "travelTarget";
-    // I'll assume I should use "goto" to keep it compatible with existing status updater unless I change that too.
-    // But wait, the user provided specific function code that sets it to "travelTarget".
-    // I should probably check if status updater handles unknown modes gracefully. It does: just shows uppercase.
-    // I will stick with "goto" to avoid breaking the "Travel: To ..." line in status message which checks for "goto".
     currentMode = "goto";
-    gotoTarget = targetVec3; // Ensure this is set for status message logic too
-
+    gotoTarget = targetVec3;
     initialTravelDistance = bot.entity.position.distanceTo(currentTarget);
+
+    // --- OPTIMIZATION: SEGMENTED PATHFINDING ---
+    // If distance > 40, pick an intermediate point 40 blocks away
+    if (initialTravelDistance > 40) {
+        console.log(`[Travel] Distance ${initialTravelDistance.toFixed(0)} > 40. Using segmented path.`);
+
+        const dir = currentTarget.minus(bot.entity.position).normalize();
+        const segmentEnd = bot.entity.position.plus(dir.scaled(40));
+
+        // Use XZ goal for segment to avoid strict Y pathfinding issues in mid-air/caves
+        // We set the "gotoTarget" to the segment end for now.
+        // The checkGotoArrival loop will detect arrival and re-trigger this function.
+        gotoTarget = new Vec3(Math.round(segmentEnd.x), Math.round(segmentEnd.y), Math.round(segmentEnd.z));
+    }
+    // -------------------------------------------
 
     bot.pathfinder.setMovements(movements);
 
     // Try full 3D goal first
-    // Note: getPathTo might not be directly exposed on bot.pathfinder (which is usually the plugin instance).
-    // Usually it is bot.pathfinder.getPathTo(movements, goal) IF the user knows that API exists.
-    // Standard mineflayer-pathfinder usage is bot.pathfinder.setGoal(goal).
-    // However, if the user insists on this snippet, I will try to use it.
-    // Use try-catch or check if method exists?
-    // Actually, I'll trust standard pathfinder doesn't have `getPathTo` on the plugin instance directly in all versions.
-    // Converting to standard setGoal logic with fallback if the user is okay, OR assuming they have a version/fork that supports it.
-    // To be safe and compliant with standard library:
-    // I will blindly paste their logic BUT checking if getPathTo exists might be hard at runtime. 
-    // I will modify it slightly to use standard `bot.pathfinder.bestPath` or just setGoal.
-    // Actually, `bot.pathfinder.getPathTo` IS NOT standard. `bot.pathfinder` is the plugin.
-    // The class `Pathfinder` has `getPathTo`. `bot.pathfinder` is an instance of `Pathfinder`.
-    // So `bot.pathfinder.getPathTo` SHOULD exist. Okay, I will trust it.
-
     let path = bot.pathfinder.getPathTo(movements, new goals.GoalBlock(
-        targetVec3.x,
-        targetVec3.y,
-        targetVec3.z
+        gotoTarget.x,
+        gotoTarget.y,
+        gotoTarget.z
     ));
 
     // If path fails → switch to "XZ smart navigation"
     if (!path || path.status === "noPath") {
         console.log("⚠ No clean 3D path — using smart navigation instead.");
         bot.pathfinder.setGoal(
-            new goals.GoalNearXZ(targetVec3.x, targetVec3.z, 2),
+            new goals.GoalNearXZ(gotoTarget.x, gotoTarget.z, 2),
             false
         );
     } else {
         bot.pathfinder.setGoal(
-            new goals.GoalBlock(targetVec3.x, targetVec3.y, targetVec3.z),
+            new goals.GoalBlock(gotoTarget.x, gotoTarget.y, gotoTarget.z),
             false
         );
     }
 
     console.log(
-        `[MODE] Goto: Traveling safely → ${targetVec3.x}, ${targetVec3.y}, ${targetVec3.z}`
+        `[MODE] Goto: Traveling safely → ${gotoTarget.x}, ${gotoTarget.y}, ${gotoTarget.z}`
     );
 }
 
@@ -610,9 +607,15 @@ function checkIfArrivedToOwner() {
 function checkGotoArrival() {
     if (currentMode !== "goto" || !gotoTarget) return;
     const dist = bot.entity.position.distanceTo(gotoTarget);
-    if (dist < 2) {
-        console.log(`[MODE] Arrived at destination ${gotoTarget}. Switching to wander.`);
-        setModeWander();
+    if (dist < 3) {
+        // If we assumed we are done, check if this was just a segment
+        if (currentTarget && bot.entity.position.distanceTo(currentTarget) > 5) {
+            console.log("[Travel] Segment complete. Recalculating next segment...");
+            startTravelToTarget(currentTarget); // Continue to final target
+        } else {
+            console.log(`[MODE] Arrived at destination ${gotoTarget}. Switching to wander.`);
+            setModeWander();
+        }
     }
 }
 
@@ -663,18 +666,28 @@ function startBot() {
     bot.on("spawn", () => {
         mcData = require("minecraft-data")(bot.version);
         movements = new Movements(bot, mcData);
-        movements.allowSprinting = true;
+        movements = new Movements(bot, mcData);
+        movements.allowSprinting = false; // OPTIMIZATION: Disable sprinting to reduce chunk loading
         movements.canDig = false;       // prevents mining through walls
         movements.allowParkour = true;  // allows parkour jumps to climb
         movements.scafoldingBlocks = []; // prevents bridging behavior
+
         console.log("Bot spawned in world.");
 
         // Mode Check Loop
         modeCheckInterval = setInterval(() => {
             if (isTravelingToOwner || currentMode === "goto" || currentMode === "stay") return;
-            if (["none", "partner", "wander"].includes(currentMode)) {
-                if (isOwnerOnline()) setModePartner();
-                else setModeWander();
+
+            // If user manually set a mode (like !wander), don't auto-switch back to partner
+            if (manualOverride) return;
+
+            // Default Auto-Behavior:
+            // If owner online -> Partner
+            // If owner offline -> Wander
+            if (isOwnerOnline()) {
+                if (currentMode !== "partner") setModePartner();
+            } else {
+                if (currentMode !== "wander") setModeWander();
             }
         }, 5000);
 
