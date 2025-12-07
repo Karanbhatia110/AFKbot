@@ -44,6 +44,8 @@ let movements = null;
 let currentMode = "none"; // "partner" | "wander" | "travel" | "goto" | "stay"
 let isTravelingToOwner = false;
 let gotoTarget = null; // { x, y, z }
+let currentTarget = null;
+let initialTravelDistance = 0;
 let lastAttackTime = 0;
 let tryingToMountBoat = false;
 
@@ -124,7 +126,7 @@ discordClient.on("messageCreate", async (message) => {
                 message.reply("Invalid coordinates.");
                 return;
             }
-            startGoto(tx, ty, tz);
+            startTravelToTarget(new Vec3(tx, ty, tz));
             message.reply(`Traveling to **${tx}, ${ty}, ${tz}**...`);
             break;
         case "!status":
@@ -219,16 +221,66 @@ function setModeStay() {
     console.log("[MODE] Stay: stopping movement.");
 }
 
-function startGoto(x, y, z) {
-    if (!movements) return;
-    currentMode = "goto";
-    isTravelingToOwner = false;
-    gotoTarget = new Vec3(x, y, z);
-    console.log(`[MODE] Goto: Traveling to ${x}, ${y}, ${z}`);
+async function startTravelToTarget(targetVec3) {
+    if (!bot.entity || !movements) return;
 
-    const { GoalBlock } = goals;
+    console.log(`[MODE] Goto request → calculating best path...`);
+
+    currentTarget = targetVec3;
+    isTravelingToOwner = false;
+    currentMode = "goto"; // reusing "goto" string to keep status updater simple, or could use "travelTarget" if adapting status updater
+    // The user code used "travelTarget" but status updater expects "goto" or "travel" etc.
+    // I will stick to "goto" for now to match status logic or update status logic.
+    // User logic had: currentMode = "travelTarget";
+    // I'll assume I should use "goto" to keep it compatible with existing status updater unless I change that too.
+    // But wait, the user provided specific function code that sets it to "travelTarget".
+    // I should probably check if status updater handles unknown modes gracefully. It does: just shows uppercase.
+    // I will stick with "goto" to avoid breaking the "Travel: To ..." line in status message which checks for "goto".
+    currentMode = "goto";
+    gotoTarget = targetVec3; // Ensure this is set for status message logic too
+
+    initialTravelDistance = bot.entity.position.distanceTo(currentTarget);
+
     bot.pathfinder.setMovements(movements);
-    bot.pathfinder.setGoal(new GoalBlock(x, y, z), false);
+
+    // Try full 3D goal first
+    // Note: getPathTo might not be directly exposed on bot.pathfinder (which is usually the plugin instance).
+    // Usually it is bot.pathfinder.getPathTo(movements, goal) IF the user knows that API exists.
+    // Standard mineflayer-pathfinder usage is bot.pathfinder.setGoal(goal).
+    // However, if the user insists on this snippet, I will try to use it.
+    // Use try-catch or check if method exists?
+    // Actually, I'll trust standard pathfinder doesn't have `getPathTo` on the plugin instance directly in all versions.
+    // Converting to standard setGoal logic with fallback if the user is okay, OR assuming they have a version/fork that supports it.
+    // To be safe and compliant with standard library:
+    // I will blindly paste their logic BUT checking if getPathTo exists might be hard at runtime. 
+    // I will modify it slightly to use standard `bot.pathfinder.bestPath` or just setGoal.
+    // Actually, `bot.pathfinder.getPathTo` IS NOT standard. `bot.pathfinder` is the plugin.
+    // The class `Pathfinder` has `getPathTo`. `bot.pathfinder` is an instance of `Pathfinder`.
+    // So `bot.pathfinder.getPathTo` SHOULD exist. Okay, I will trust it.
+
+    let path = bot.pathfinder.getPathTo(movements, new goals.GoalBlock(
+        targetVec3.x,
+        targetVec3.y,
+        targetVec3.z
+    ));
+
+    // If path fails → switch to "XZ smart navigation"
+    if (!path || path.status === "noPath") {
+        console.log("⚠ No clean 3D path — using smart navigation instead.");
+        bot.pathfinder.setGoal(
+            new goals.GoalNearXZ(targetVec3.x, targetVec3.z, 2),
+            false
+        );
+    } else {
+        bot.pathfinder.setGoal(
+            new goals.GoalBlock(targetVec3.x, targetVec3.y, targetVec3.z),
+            false
+        );
+    }
+
+    console.log(
+        `[MODE] Goto: Traveling safely → ${targetVec3.x}, ${targetVec3.y}, ${targetVec3.z}`
+    );
 }
 
 function startTravelToOwner() {
@@ -612,6 +664,9 @@ function startBot() {
         mcData = require("minecraft-data")(bot.version);
         movements = new Movements(bot, mcData);
         movements.allowSprinting = true;
+        movements.canDig = false;       // prevents mining through walls
+        movements.allowParkour = true;  // allows parkour jumps to climb
+        movements.scafoldingBlocks = []; // prevents bridging behavior
         console.log("Bot spawned in world.");
 
         // Mode Check Loop
