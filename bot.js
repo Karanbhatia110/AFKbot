@@ -1,3 +1,4 @@
+require("dotenv").config();
 const express = require("express");
 const mineflayer = require("mineflayer");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
@@ -17,8 +18,8 @@ const SERVER_HOST = "__HAVEN__.aternos.me";  // Aternos host
 const SERVER_PORT = 33034;                   // Aternos port
 
 // Discord Config
-const DISCORD_TOKEN = "MTIwODM2NDIxMzk5NTgzOTUyOQ.GwzIlo.qdBKWYcXBBu6hJFXZxZZDr3zv4Uz-IrmDHlAFk"; // <--- FILL THIS IN
-const DISCORD_CHANNEL_ID = "1354814255739965450"; // <--- FILL THIS IN
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID;
 
 // Hostile mobs that bot will attack (never players)
 const HOSTILE_MOBS = new Set([
