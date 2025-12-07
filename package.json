@@ -1,14 +1,19 @@
 {
-  "name": "mineflayer-afkbot",
+  "name": "mineflayer-afk-bodyguard",
   "version": "1.0.0",
-  "description": "AFK bot for Aternos server",
-  "main": "index.js",
+  "description": "AFK + partner/wander bot for ZioGod",
+  "main": "bot.js",
   "type": "commonjs",
   "scripts": {
-    "start": "node bot.js"
+    "start": "node bot.js",
+    "test": "echo \"Error: no test specified\" && exit 1"
   },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
   "dependencies": {
     "mineflayer": "^4.33.0",
-    "express": "^4.19.2"
+    "express": "^4.19.2",
+    "mineflayer-pathfinder": "^2.4.0"
   }
 }
