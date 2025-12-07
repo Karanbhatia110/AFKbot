@@ -10,7 +10,7 @@ const PORT = process.env.PORT || 3000;
 
 // ===== CONFIG =====
 const OWNER_NAME = "ZioGod";                 // your IGN (case-sensitive!)
-const SAFE_POS = new Vec3(285, 91, 2381);    // safe / base center
+const SAFE_POS = new Vec3(612, 110, 3324);    // safe / base center
 const WANDER_RADIUS = 15;                    // wander range when you're offline
 const BOT_USERNAME = "ZioBot";               // bot username
 
@@ -237,20 +237,8 @@ async function startTravelToTarget(targetVec3) {
     gotoTarget = targetVec3;
     initialTravelDistance = bot.entity.position.distanceTo(currentTarget);
 
-    // --- OPTIMIZATION: SEGMENTED PATHFINDING ---
-    // If distance > 40, pick an intermediate point 40 blocks away
-    if (initialTravelDistance > 40) {
-        console.log(`[Travel] Distance ${initialTravelDistance.toFixed(0)} > 40. Using segmented path.`);
-
-        const dir = currentTarget.minus(bot.entity.position).normalize();
-        const segmentEnd = bot.entity.position.plus(dir.scaled(40));
-
-        // Use XZ goal for segment to avoid strict Y pathfinding issues in mid-air/caves
-        // We set the "gotoTarget" to the segment end for now.
-        // The checkGotoArrival loop will detect arrival and re-trigger this function.
-        gotoTarget = new Vec3(Math.round(segmentEnd.x), Math.round(segmentEnd.y), Math.round(segmentEnd.z));
-    }
-    // -------------------------------------------
+    // Segmented pathfinding removed by user request.
+    // Bot will calculate path to the final target immediately.
 
     bot.pathfinder.setMovements(movements);
 
@@ -306,49 +294,50 @@ function startTravelToOwner() {
 // ===== DISCORD STATUS UPDATER =====
 async function updateStatusMessage() {
     if (!discordClient.isReady()) return;
-    const channel = discordClient.channels.cache.get(DISCORD_CHANNEL_ID);
-    if (!channel) return;
-
-    let statusText = "**STATUS:** Offline / Connecting...";
-
-    if (bot && bot.entity) {
-        const pos = bot.entity.position;
-        const x = Math.round(pos.x);
-        const y = Math.round(pos.y);
-        const z = Math.round(pos.z);
-        const block = bot.blockAt(pos);
-        const biomeName = (block && block.biome) ? block.biome.name : "Unknown";
-        const timeOfDay = bot.time.timeOfDay;
-
-        let travelText = "None";
-        if (currentMode === "travel" && bot.players[OWNER_NAME]?.entity) {
-            const dest = bot.players[OWNER_NAME].entity.position;
-            const dist = pos.distanceTo(dest).toFixed(0);
-            travelText = `To Owner (${dist}m)`;
-        } else if (currentMode === "goto" && gotoTarget) {
-            const dist = pos.distanceTo(gotoTarget).toFixed(0);
-            travelText = `To ${gotoTarget.x}, ${gotoTarget.y}, ${gotoTarget.z} (${dist}m)`;
-        }
-
-        statusText =
-            `**MODE:** ${currentMode.toUpperCase()}\n` +
-            `**POS:** ${x}, ${y}, ${z}\n` +
-            `**BIOME:** ${biomeName}\n` +
-            `**TIME:** ${timeOfDay}\n` +
-            `**TRAVEL:** ${travelText}`;
-    }
-
-    // Find existing pinned status message if not cached
-    if (!statusMessage) {
-        try {
-            const pinned = await channel.messages.fetchPinned();
-            statusMessage = pinned.find(m => m.author.id === discordClient.user.id);
-        } catch (err) {
-            console.error("Failed to fetch pins:", err);
-        }
-    }
 
     try {
+        const channel = await discordClient.channels.fetch(DISCORD_CHANNEL_ID);
+        if (!channel) return;
+
+        let statusText = "**STATUS:** Offline / Connecting...";
+
+        if (bot && bot.entity) {
+            const pos = bot.entity.position;
+            const x = Math.round(pos.x);
+            const y = Math.round(pos.y);
+            const z = Math.round(pos.z);
+            const block = bot.blockAt(pos);
+            const biomeName = (block && block.biome) ? block.biome.name : "Unknown";
+            const timeOfDay = bot.time.timeOfDay;
+
+            let travelText = "None";
+            if (currentMode === "travel" && bot.players[OWNER_NAME]?.entity) {
+                const dest = bot.players[OWNER_NAME].entity.position;
+                const dist = pos.distanceTo(dest).toFixed(0);
+                travelText = `To Owner (${dist}m)`;
+            } else if (currentMode === "goto" && gotoTarget) {
+                const dist = pos.distanceTo(gotoTarget).toFixed(0);
+                travelText = `To ${gotoTarget.x}, ${gotoTarget.y}, ${gotoTarget.z} (${dist}m)`;
+            }
+
+            statusText =
+                `**MODE:** ${currentMode.toUpperCase()}\n` +
+                `**POS:** ${x}, ${y}, ${z}\n` +
+                `**BIOME:** ${biomeName}\n` +
+                `**TIME:** ${timeOfDay}\n` +
+                `**TRAVEL:** ${travelText}`;
+        }
+
+        // Find existing pinned status message if not cached
+        if (!statusMessage) {
+            try {
+                const pinned = await channel.messages.fetchPins();
+                statusMessage = pinned.find(m => m.author.id === discordClient.user.id);
+            } catch (err) {
+                console.error("Failed to fetch pins:", err);
+            }
+        }
+
         if (statusMessage) {
             if (statusMessage.content !== statusText) {
                 await statusMessage.edit(statusText);
@@ -360,6 +349,7 @@ async function updateStatusMessage() {
         }
     } catch (err) {
         console.error("Failed to update status message:", err);
+        statusMessage = null; // Reset status message on error to force re-fetch
     }
 }
 
