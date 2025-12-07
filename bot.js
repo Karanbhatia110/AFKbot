@@ -2,6 +2,7 @@ const express = require("express");
 const mineflayer = require("mineflayer");
 const { pathfinder, Movements, goals } = require("mineflayer-pathfinder");
 const { Vec3 } = require("vec3");
+const { Client, GatewayIntentBits, EmbedBuilder } = require("discord.js");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -14,6 +15,10 @@ const BOT_USERNAME = "ZioBot";               // bot username
 
 const SERVER_HOST = "__HAVEN__.aternos.me";  // Aternos host
 const SERVER_PORT = 33034;                   // Aternos port
+
+// Discord Config
+const DISCORD_TOKEN = "MTIwODM2NDIxMzk5NTgzOTUyOQ.GwzIlo.qdBKWYcXBBu6hJFXZxZZDr3zv4Uz-IrmDHlAFk"; // <--- FILL THIS IN
+const DISCORD_CHANNEL_ID = "1354814255739965450"; // <--- FILL THIS IN
 
 // Hostile mobs that bot will attack (never players)
 const HOSTILE_MOBS = new Set([
@@ -39,15 +44,28 @@ function startBot() {
 
     bot.loadPlugin(pathfinder);
 
+    // Discord Client
+    const discordClient = new Client({
+        intents: [
+            GatewayIntentBits.Guilds,
+            GatewayIntentBits.GuildMessages,
+            GatewayIntentBits.MessageContent
+        ]
+    });
+
     let mcData = null;
     let movements = null;
-    let currentMode = "none"; // "partner" | "wander" | "travel"
+    let currentMode = "none"; // "partner" | "wander" | "travel" | "goto" | "stay"
     let modeCheckInterval = null;
     let wanderInterval = null;
     let humanLookInterval = null;
     let lastAttackTime = 0;
     let isTravelingToOwner = false;
     let survivalInterval = null;
+
+    // Discord Status State
+    let statusMessage = null; // cached pinned message
+    let gotoTarget = null; // { x, y, z } for !goto
 
     // ===== Helpers =====
 
@@ -100,6 +118,8 @@ function startBot() {
         if (!movements) return;
         if (!isOwnerOnline()) return;
         currentMode = "partner";
+        isTravelingToOwner = false;
+        gotoTarget = null;
         console.log("[MODE] Partner: owner online, following & defending.");
 
         const ownerEntity = bot.players[OWNER_NAME].entity;
@@ -111,7 +131,9 @@ function startBot() {
     function setModeWander() {
         if (!movements) return;
         currentMode = "wander";
-        console.log("[MODE] Wander: owner offline, roaming safely.");
+        isTravelingToOwner = false;
+        gotoTarget = null;
+        console.log("[MODE] Wander: roaming safely.");
 
         const { GoalBlock } = goals;
         bot.pathfinder.setMovements(movements);
@@ -119,6 +141,26 @@ function startBot() {
             new GoalBlock(SAFE_POS.x, SAFE_POS.y, SAFE_POS.z),
             false
         );
+    }
+
+    function setModeStay() {
+        currentMode = "stay";
+        isTravelingToOwner = false;
+        gotoTarget = null;
+        bot.pathfinder.setGoal(null);
+        console.log("[MODE] Stay: stopping movement.");
+    }
+
+    function startGoto(x, y, z) {
+        if (!movements) return;
+        currentMode = "goto";
+        isTravelingToOwner = false;
+        gotoTarget = new Vec3(x, y, z);
+        console.log(`[MODE] Goto: Traveling to ${x}, ${y}, ${z}`);
+
+        const { GoalBlock } = goals;
+        bot.pathfinder.setMovements(movements);
+        bot.pathfinder.setGoal(new GoalBlock(x, y, z), false); // don't stop at goal immediately, handled by loop
     }
 
     function startHumanLook() {
@@ -183,6 +225,7 @@ function startBot() {
         }
         isTravelingToOwner = true;
         currentMode = "travel";
+        gotoTarget = null;
         console.log(`[MODE] Traveling to ${OWNER_NAME}...`);
 
         const { GoalNear } = goals;
@@ -206,6 +249,15 @@ function startBot() {
             isTravelingToOwner = false;
             console.log(`[MODE] Arrived to ${OWNER_NAME}. Switching to partner mode.`);
             setModePartner();
+        }
+    }
+
+    function checkGotoArrival() {
+        if (currentMode !== "goto" || !gotoTarget) return;
+        const dist = bot.entity.position.distanceTo(gotoTarget);
+        if (dist < 2) {
+            console.log(`[MODE] Arrived at destination ${gotoTarget}. Switching to wander.`);
+            setModeWander();
         }
     }
 
@@ -435,8 +487,8 @@ function startBot() {
     }
 
     async function survivalTick() {
-        // Don't interrupt travel to owner
-        if (currentMode === "travel") return;
+        // Don't interrupt travel to owner or explicit goto
+        if (currentMode === "travel" || currentMode === "goto") return;
 
         eatIfHungry();
         // If still low food, hunt & cook
@@ -503,6 +555,125 @@ function startBot() {
         }
     }
 
+    // ===== Discord Logic =====
+
+    async function updateStatusMessage() {
+        if (!discordClient.isReady()) return;
+        const channel = discordClient.channels.cache.get(DISCORD_CHANNEL_ID);
+        if (!channel) return;
+
+        // Gather Info
+        const pos = bot.entity.position;
+        const x = Math.round(pos.x);
+        const y = Math.round(pos.y);
+        const z = Math.round(pos.z);
+        const block = bot.blockAt(pos);
+        const biomeName = (block && block.biome) ? block.biome.name : "Unknown";
+        const timeOfDay = bot.time.timeOfDay;
+
+        let travelText = "None";
+        if (currentMode === "travel" && bot.players[OWNER_NAME]?.entity) {
+            const dest = bot.players[OWNER_NAME].entity.position;
+            const dist = pos.distanceTo(dest).toFixed(0);
+            travelText = `To Owner (${dist}m)`;
+        } else if (currentMode === "goto" && gotoTarget) {
+            const dist = pos.distanceTo(gotoTarget).toFixed(0);
+            travelText = `To ${gotoTarget.x}, ${gotoTarget.y}, ${gotoTarget.z} (${dist}m)`;
+        }
+
+        const statusText =
+            `**MODE:** ${currentMode.toUpperCase()}\n` +
+            `**POS:** ${x}, ${y}, ${z}\n` +
+            `**BIOME:** ${biomeName}\n` +
+            `**TIME:** ${timeOfDay}\n` +
+            `**TRAVEL:** ${travelText}`;
+
+        // Find existing pinned status message if not cached
+        if (!statusMessage) {
+            try {
+                const pinned = await channel.messages.fetchPinned();
+                statusMessage = pinned.find(m => m.author.id === discordClient.user.id);
+            } catch (err) {
+                console.error("Failed to fetch pins:", err);
+            }
+        }
+
+        try {
+            if (statusMessage) {
+                if (statusMessage.content !== statusText) {
+                    await statusMessage.edit(statusText);
+                }
+            } else {
+                const sent = await channel.send(statusText);
+                await sent.pin();
+                statusMessage = sent;
+            }
+        } catch (err) {
+            console.error("Failed to update status message:", err);
+        }
+    }
+
+    discordClient.once("ready", () => {
+        console.log(`Discord bot logged in as ${discordClient.user.tag}`);
+        setInterval(updateStatusMessage, 10000); // 10s update loop
+    });
+
+    discordClient.on("messageCreate", async (message) => {
+        if (message.author.bot) return;
+        if (message.channel.id !== DISCORD_CHANNEL_ID) return;
+        // Commands
+        const args = message.content.trim().split(/\s+/);
+        const cmd = args[0].toLowerCase();
+
+        switch (cmd) {
+            case "!wander":
+                setModeWander();
+                message.reply("Switched to **Wander** mode.");
+                break;
+            case "!stay":
+                setModeStay();
+                message.reply("Stopped movement. Mode: **Stay**.");
+                break;
+            case "!follow":
+                if (isOwnerOnline()) {
+                    setModePartner();
+                    message.reply("Switched to **Partner** mode (Following owner).");
+                } else {
+                    message.reply("Owner is not online!");
+                }
+                break;
+            case "!come":
+                message.reply("Executing COME command...");
+                // Force check logic from chat command
+                const ownerEntity = bot.players[OWNER_NAME]?.entity;
+                if (ownerEntity) {
+                    startTravelToOwner();
+                } else {
+                    message.reply("Owner entity not found currently.");
+                }
+                break;
+            case "!goto":
+                if (args.length < 4) {
+                    message.reply("Usage: `!goto <x> <y> <z>`");
+                    return;
+                }
+                const tx = parseFloat(args[1]);
+                const ty = parseFloat(args[2]);
+                const tz = parseFloat(args[3]);
+                if (isNaN(tx) || isNaN(ty) || isNaN(tz)) {
+                    message.reply("Invalid coordinates.");
+                    return;
+                }
+                startGoto(tx, ty, tz);
+                message.reply(`Traveling to **${tx}, ${ty}, ${tz}**...`);
+                break;
+            case "!status":
+                await updateStatusMessage();
+                message.reply("Status updated.");
+                break;
+        }
+    });
+
 
     bot.on("spawn", () => {
         mcData = require("minecraft-data")(bot.version);
@@ -511,10 +682,27 @@ function startBot() {
 
         console.log("Bot spawned in world.");
 
+        // Start Discord Bot if not already
+        if (!discordClient.isReady()) {
+            discordClient.login(DISCORD_TOKEN).catch(e => console.error("Discord Login Failed:", e));
+        }
+
         modeCheckInterval = setInterval(() => {
-            if (isTravelingToOwner) return;
-            if (isOwnerOnline()) setModePartner();
-            else setModeWander();
+            if (isTravelingToOwner || currentMode === "goto" || currentMode === "stay") return;
+            // Only auto-switch between Partner and Wander if not in a manual override mode like goto/stay
+            // However, original logic was: if Owner Online -> Partner, else Wander.
+            // Requirement: "Support Discord commands... !wander, !stay..."
+            // If user sets !stay, we shouldn't auto-switch back immediately.
+            // So we modify this logic slightly to respect manual modes, 
+            // OR we assume Partner/Wander are the default "Auto" modes.
+            // The prompt says "Wander mode near SAFE_POS" is a default feature.
+            // I will keep the auto-switch ONLY if currentMode is 'none', 'partner', or 'wander'.
+            // If it is 'stay' or 'goto', we leave it alone.
+
+            if (["none", "partner", "wander"].includes(currentMode)) {
+                if (isOwnerOnline()) setModePartner();
+                else setModeWander();
+            }
         }, 5000);
 
         startHumanLook();
@@ -552,6 +740,7 @@ function startBot() {
         }
 
         checkIfArrivedToOwner();
+        checkGotoArrival(); // NEW
         sitWithOwnerInBoat();
         leaveBoatIfOwnerLeft();
         eatIfHungry();
