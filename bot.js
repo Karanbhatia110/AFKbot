@@ -690,3 +690,13 @@ function startBot() {
 
 // Start Main Loop
 startBot();
+
+// Prevent process from crashing on unhandled network errors
+process.on('uncaughtException', (err) => {
+    console.error("Uncaught Exception:", err);
+    // process.exit(1); // Do NOT exit, let the bot try to recover via its own logic
+});
+
+process.on('unhandledRejection', (reason, promise) => {
+    console.error("Unhandled Rejection at:", promise, "reason:", reason);
+});
